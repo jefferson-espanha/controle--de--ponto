@@ -2,44 +2,35 @@ from calendar import monthrange
 from datetime import datetime
 import io
 import os
-# Define o caminho do diretório do script atual
-PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 import sys
-import subprocess
-import pandas as pd
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QAbstractItemView,
-    QApplication,
-    QComboBox,
-    QDialog,
-    QFormLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Table, TableStyle
+import streamlit as st
 from supabase import Client, create_client
+
+# Define o caminho do diretório do script atual
+PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 
 # ==========================================
 # CONEXÃO BANCO DE DADOS
 # ==========================================
-SUPABASE_URL = "https://rqzenyisowodympiheod.supabase.co"
-SUPABASE_KEY = "sb_publishable_yKGWZScOzAmahuDH62c0aw_SjlyvXjj"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_URL = st.secrets.get(
+    "SUPABASE_URL", "https://rqzenyisowodympiheod.supabase.co"
+)
+SUPABASE_KEY = st.secrets.get(
+    "SUPABASE_KEY", "sb_publishable_yKGWZScOzAmahuDH62c0aw_SjlyvXjj"
+)
+
+
+@st.cache_resource
+def init_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+supabase = init_supabase()
 
 DIAS_SEMANA = [
     "Segunda-feira",
@@ -170,22 +161,9 @@ def obter_meta_mensal(usuario, mes, ano):
     return 0.0
 
 
-def abrir_arquivo_pdf(caminho):
-    try:
-        if sys.platform == "win32":
-            os.startfile(caminho)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", caminho])
-        else:
-            subprocess.run(["xdg-open", caminho])
-    except Exception as e:
-        print(f"Não foi possível abrir o PDF automaticamente: {e}")
-
-
-def gerar_pdf_arquivo(
-    usuario, mes, ano, df_exibicao, totais, cargo, caminho_saida
-):
-    c = canvas.Canvas(caminho_saida, pagesize=A4)
+def gerar_pdf_bytes(usuario, mes, ano, dados_memoria, totais, cargo):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
     w, h = A4
 
     path_cabecalho = os.path.join(PASTA_ATUAL, "cabecalho.png")
@@ -201,7 +179,7 @@ def gerar_pdf_arquivo(
                 height=3.5 * cm,
                 mask="auto",
             )
-        
+
         if os.path.exists(path_rodape):
             c.drawImage(
                 path_rodape,
@@ -213,9 +191,7 @@ def gerar_pdf_arquivo(
             )
 
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(
-            1.5 * cm, h - 4.0 * cm, f"SERVIDOR: {str(usuario).upper()}"
-        )
+        c.drawString(1.5 * cm, h - 4.0 * cm, f"SERVIDOR: {str(usuario).upper()}")
         c.drawString(1.5 * cm, h - 4.5 * cm, f"CARGO: {str(cargo).upper()}")
         c.drawString(w - 6 * cm, h - 4.0 * cm, f"MÊS/ANO: {mes}/{ano}")
 
@@ -233,7 +209,7 @@ def gerar_pdf_arquivo(
         "Obs",
     ]]
 
-    for _, v in df_exibicao.iterrows():
+    for v in dados_memoria:
         data_pdf.append([
             str(v["Data"]),
             str(v["Dia"])[:3],
@@ -285,7 +261,9 @@ def gerar_pdf_arquivo(
         f" {totais['dev']} | Cursos: {totais['cursos']}",
     )
     c.drawString(
-        1.5 * cm, y_resumo - 0.4 * cm, f"Falta Ponto Facultativo: {totais['fac']}"
+        1.5 * cm,
+        y_resumo - 0.4 * cm,
+        f"Falta Ponto Facultativo: {totais['fac']}",
     )
 
     y_ass = y_resumo - 2.5 * cm
@@ -301,155 +279,51 @@ def gerar_pdf_arquivo(
     c.drawCentredString(w - 5 * cm, y_ass - 0.4 * cm, "Chefia Imediata")
 
     c.save()
-    abrir_arquivo_pdf(caminho_saida)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 
 # ==========================================
-# 2. MODAL DE EDIÇÃO COMPLETO
+# 2. INTERFACE STREAMLIT
 # ==========================================
-class DialogEdicaoPonto(QDialog):
+def main(usuario="ADMIN"):
+    st.set_page_config(
+        page_title=f"Sistema de Ponto - {usuario}",
+        page_icon="⏱️",
+        layout="wide",
+    )
 
-    def __init__(self, data_row, usuario, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(
-            f"✏️ Editar Registro de Ponto - {data_row['Data']}"
-        )
-        self.setMinimumWidth(400)
-        self.data_row = data_row
-        self.usuario = usuario
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        ent_val = data_row.get("Entrada", "") or "00:00:00"
-        alm_val = data_row.get("Almoço", "") or "00:00:00"
-        ret_val = data_row.get("Retorno", "") or "00:00:00"
-        sai_val = data_row.get("Saída", "") or "00:00:00"
-        
-        cur_raw = data_row.get("Cursos", 0.0)
-        if isinstance(cur_raw, (float, int)):
-            cur_val = formatar_horas(cur_raw) if cur_raw > 0 else "00:00:00"
-        else:
-            cur_val = str(cur_raw) if cur_raw else "00:00:00"
-
-        self.input_e1 = QLineEdit(ent_val)
-        self.input_a1 = QLineEdit(alm_val)
-        self.input_r1 = QLineEdit(ret_val)
-        self.input_s1 = QLineEdit(sai_val)
-        self.input_obs = QLineEdit(data_row.get("Obs", ""))
-        self.input_cursos = QLineEdit(cur_val)
-
-        form.addRow("Entrada:", self.input_e1)
-        form.addRow("Almoço:", self.input_a1)
-        form.addRow("Retorno:", self.input_r1)
-        form.addRow("Saída:", self.input_s1)
-        form.addRow("Observação:", self.input_obs)
-        form.addRow("Horas Curso:", self.input_cursos)
-
-        layout.addLayout(form)
-
-        layout.addWidget(QLabel("<b>Atalhos Rápidos:</b>"))
-        btn_grid = QHBoxLayout()
-
-        for txt in ["FÉRIAS", "ABONADA", "ATESTADO", "FERIADO", "FACULTATIVO"]:
-            b = QPushButton(txt)
-            b.clicked.connect(
-                lambda ch, t=txt: self.input_obs.setText(t)
-            )
-            btn_grid.addWidget(b)
-        layout.addLayout(btn_grid)
-
-        btn_prova = QPushButton("SEMANA DE PROVA")
-        btn_prova.clicked.connect(
-            lambda: self.input_obs.setText("SEMANA DE PROVA AH:02:45")
-        )
-        layout.addWidget(btn_prova)
-
-        btn_salvar = QPushButton("💾 SALVAR REGISTRO")
-        btn_salvar.setStyleSheet(
-            "background-color: #0078D7; color: white; font-weight: bold;"
-            " padding: 8px;"
-        )
-        btn_salvar.clicked.connect(self.salvar)
-        layout.addWidget(btn_salvar)
-
-    def salvar(self):
-        h_curso_val = converter_texto_para_decimal(self.input_cursos.text().strip())
-
-        dados = {
-            "entrada": self.input_e1.text().strip(),
-            "almoco": self.input_a1.text().strip(),
-            "retorno": self.input_r1.text().strip(),
-            "saida": self.input_s1.text().strip(),
-            "obs": self.input_obs.text().strip().upper(),
-            "cursos": h_curso_val,
+    # Estilização CSS Personalizada
+    st.markdown(
+        """
+        <style>
+        .stButton>button {
+            border-radius: 5px;
+            font-weight: bold;
         }
+        .rodape-assinatura {
+            text-align: center;
+            color: #000000;
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            margin-top: 30px;
+            margin-bottom: 10px;
+        }
+        </style>
+    """,
+        unsafe_allow_html=True,
+    )
 
-        try:
-            if self.data_row.get("ID"):
-                supabase.table("ponto").update(dados).eq(
-                    "id", self.data_row["ID"]
-                ).execute()
-            else:
-                dados["funcionario"] = self.usuario
-                dados["data"] = self.data_row["Data"]
-                supabase.table("ponto").insert(dados).execute()
+    st.title(f"⏱️ Sistema de Ponto - {usuario.upper()}")
 
-            QMessageBox.information(
-                self, "Sucesso", "Registro atualizado com sucesso!"
-            )
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Erro ao salvar: {e}")
+    # ------------------------------------------
+    # BOTÕES DE REGISTRO RÁPIDO DE PONTO
+    # ------------------------------------------
+    st.subheader("Batida Ponto Rápida")
+    c1, c2, c3, c4 = st.columns(4)
 
-
-# ==========================================
-# 3. JANELA PRINCIPAL
-# ==========================================
-class JanelaPonto(QMainWindow):
-
-    def __init__(self, usuario="ADMIN"):
-        super().__init__()
-        self.usuario_atual = usuario
-        self.setWindowTitle(f"Sistema de Ponto - {self.usuario_atual}")
-        self.setGeometry(100, 100, 1280, 720)
-
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        self.main_layout = QVBoxLayout(main_widget)
-        self.main_layout.setContentsMargins(5, 5, 5, 5)
-
-        self.criar_topo_botoes()
-        self.criar_barra_filtros()
-        self.criar_tabela()
-        self.criar_rodape()
-
-        self.carregar_dados()
-
-    def criar_topo_botoes(self):
-        top_layout = QHBoxLayout()
-
-        botoes = [
-            ("ENTRADA", "#27ae60", "ENTRADA"),
-            ("ALMOÇO", "#f39c12", "ALMOÇO"),
-            ("RETORNO", "#2980b9", "RETORNO"),
-            ("SAÍDA", "#c0392b", "SAÍDA"),
-        ]
-
-        for texto, cor, tipo in botoes:
-            btn = QPushButton(texto)
-            btn.setStyleSheet(
-                f"background-color: {cor}; color: white; font-weight: bold;"
-                " padding: 6px 20px;"
-            )
-            btn.clicked.connect(
-                lambda checked, t=tipo: self.registrar_ponto_rapido(t)
-            )
-            top_layout.addWidget(btn)
-
-        top_layout.addStretch()
-        self.main_layout.addLayout(top_layout)
-
-    def registrar_ponto_rapido(self, tipo):
+    def registrar_ponto_rapido(tipo):
         hoje = datetime.now().strftime("%d/%m/%Y")
         hora = datetime.now().strftime("%H:%M:%S")
         mapa = {
@@ -464,7 +338,7 @@ class JanelaPonto(QMainWindow):
             res = (
                 supabase.table("ponto")
                 .select("id")
-                .eq("funcionario", self.usuario_atual)
+                .eq("funcionario", usuario)
                 .eq("data", hoje)
                 .execute()
             )
@@ -476,7 +350,7 @@ class JanelaPonto(QMainWindow):
                 ).execute()
             else:
                 nova_linha = {
-                    "funcionario": self.usuario_atual,
+                    "funcionario": usuario,
                     "data": hoje,
                     "entrada": "",
                     "almoco": "",
@@ -486,362 +360,402 @@ class JanelaPonto(QMainWindow):
                 }
                 supabase.table("ponto").insert(nova_linha).execute()
 
-            QMessageBox.information(
-                self, "Ponto Registrado", f"{tipo} registrada às {hora}!"
-            )
-            self.carregar_dados()
+            st.success(f"{tipo} registrada com sucesso às {hora}!")
+            st.rerun()
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Erro ao registrar ponto: {e}")
+            st.error(f"Erro ao registrar ponto: {e}")
 
-    def criar_barra_filtros(self):
-        filter_layout = QHBoxLayout()
+    with c1:
+        if st.button("🟢 ENTRADA", use_container_width=True):
+            registrar_ponto_rapido("ENTRADA")
+    with c2:
+        if st.button("🟡 ALMOÇO", use_container_width=True):
+            registrar_ponto_rapido("ALMOÇO")
+    with c3:
+        if st.button("🔵 RETORNO", use_container_width=True):
+            registrar_ponto_rapido("RETORNO")
+    with c4:
+        if st.button("🔴 SAÍDA", use_container_width=True):
+            registrar_ponto_rapido("SAÍDA")
 
-        self.combo_mes = QComboBox()
-        self.combo_mes.addItems([f"{i:02d}" for i in range(1, 13)])
-        self.combo_mes.setCurrentText(datetime.now().strftime("%m"))
-        self.combo_mes.currentIndexChanged.connect(self.carregar_dados)
+    st.markdown("---")
 
-        self.combo_ano = QComboBox()
-        self.combo_ano.addItems([str(a) for a in range(2024, 2031)])
-        self.combo_ano.setCurrentText(datetime.now().strftime("%Y"))
-        self.combo_ano.currentIndexChanged.connect(self.carregar_dados)
-
-        filter_layout.addWidget(self.combo_mes)
-        filter_layout.addWidget(self.combo_ano)
-        filter_layout.addStretch()
-
-        btn_pdf = QPushButton("📄 PDF")
-        btn_pdf.setStyleSheet(
-            "background-color: #c0392b; color: white; font-weight: bold;"
-            " padding: 4px 15px;"
+    # ------------------------------------------
+    # FILTROS DE MÊS E ANO
+    # ------------------------------------------
+    col_mes, col_ano, col_empty = st.columns([2, 2, 6])
+    with col_mes:
+        meses = [f"{i:02d}" for i in range(1, 13)]
+        mes_sel = st.selectbox(
+            "Mês",
+            meses,
+            index=int(datetime.now().strftime("%m")) - 1,
+            key="filtro_mes",
         )
-        btn_pdf.clicked.connect(self.gerar_pdf)
-        filter_layout.addWidget(btn_pdf)
-
-        self.main_layout.addLayout(filter_layout)
-
-    def criar_tabela(self):
-        self.tabela = QTableWidget()
-        colunas = [
-            "Data",
-            "Dia",
-            "Ent.",
-            "Alm.",
-            "Ret.",
-            "Sai.",
-            "Total",
-            "Comp.",
-            "Dev.",
-            "Obs",
-        ]
-        self.tabela.setColumnCount(len(colunas))
-        self.tabela.setHorizontalHeaderLabels(colunas)
-
-        header = self.tabela.horizontalHeader()
-        for i in range(len(colunas)):
-            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
-
-        self.tabela.setAlternatingRowColors(True)
-        self.tabela.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
+    with col_ano:
+        anos = [str(a) for a in range(2024, 2031)]
+        ano_sel = st.selectbox(
+            "Ano",
+            anos,
+            index=anos.index(datetime.now().strftime("%Y")),
+            key="filtro_ano",
         )
-        self.tabela.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
+
+    mes_int = int(mes_sel)
+    ano_int = int(ano_sel)
+    _, ultimo_dia = monthrange(ano_int, mes_int)
+
+    cargo_atual, base_hora_atual = obter_dados_usuario(usuario)
+    meta_mes_atual = obter_meta_mensal(usuario, mes_sel, ano_sel)
+
+    # ------------------------------------------
+    # CARREGAMENTO DO BANCO DE DADOS
+    # ------------------------------------------
+    try:
+        res = (
+            supabase.table("ponto")
+            .select("*")
+            .eq("funcionario", usuario)
+            .execute()
         )
-        self.tabela.itemDoubleClicked.connect(self.abrir_modal_edicao)
-        self.main_layout.addWidget(self.tabela)
+        mapa_pontos = {r["data"]: r for r in res.data}
+    except Exception:
+        mapa_pontos = {}
 
-    def criar_rodape(self):
-        bot_layout = QHBoxLayout()
+    dados_memoria = []
+    (
+        total_comp_acumulado,
+        total_dev_acumulado,
+        total_trabalhado_bruto,
+        total_cursos,
+    ) = (0.0, 0.0, 0.0, 0.0)
 
-        bot_layout.addWidget(QLabel("Hora base do servidor:"))
-        self.input_base = QLineEdit("08:00:00")
-        self.input_base.setFixedWidth(65)
-        bot_layout.addWidget(self.input_base)
+    for dia in range(1, ultimo_dia + 1):
+        data_str = f"{dia:02d}/{mes_int:02d}/{ano_int}"
+        dt_obj = datetime.strptime(data_str, "%d/%m/%Y")
+        e_fim_de_semana = dt_obj.weekday() >= 5
+        r = mapa_pontos.get(data_str, {})
 
-        bot_layout.addWidget(QLabel("Meta de Hora de Ponto Facultativo do mês:"))
-        self.input_meta = QLineEdit("00:00:00")
-        self.input_meta.setFixedWidth(65)
-        bot_layout.addWidget(self.input_meta)
+        id_reg = r.get("id")
+        e1 = r.get("entrada", "") or ""
+        a1 = r.get("almoco", "") or ""
+        r1 = r.get("retorno", "") or ""
+        s1 = r.get("saida", "") or ""
+        obs = r.get("obs", "") or ""
+        h_curso = float(r.get("cursos") or 0.0)
 
-        bot_layout.addWidget(QLabel("Cargo:"))
-        self.input_cargo = QLineEdit("")
-        self.input_cargo.setFixedWidth(120)
-        bot_layout.addWidget(self.input_cargo)
-
-        btn_salvar_cfg = QPushButton("💾 SALVAR")
-        btn_salvar_cfg.setStyleSheet(
-            "background-color: #34495e; color: white; font-weight: bold;"
+        h_d_final = calcular_trabalhado_dia(
+            e1, a1, r1, s1, obs, float(base_hora_atual)
         )
-        btn_salvar_cfg.clicked.connect(self.salvar_configuracoes)
-        bot_layout.addWidget(btn_salvar_cfg)
 
-        bot_layout.addSpacing(15)
+        comp_dia, dev_dia = 0.0, 0.0
+        tem_ponto = any(x and str(x).strip() != "" for x in [e1, a1, r1, s1])
+        tem_ah = "AH:" in str(obs).upper()
 
-        self.lbl_trab = QLabel("Trabalhado: 00:00:00")
-        self.lbl_trab.setStyleSheet("font-weight: bold;")
-        self.lbl_ext = QLabel("Extras (Líquido): 00:00:00")
-        self.lbl_ext.setStyleSheet("color: green; font-weight: bold;")
-        self.lbl_cur = QLabel("Cursos: 00:00:00")
-        self.lbl_cur.setStyleSheet("color: purple; font-weight: bold;")
-        self.lbl_dev = QLabel("Devedoras: 00:00:00")
-        self.lbl_dev.setStyleSheet("color: red; font-weight: bold;")
-        self.lbl_fac = QLabel("Falta Ponto Facultativo: 00:00:00")
-        self.lbl_fac.setStyleSheet("color: blue; font-weight: bold;")
-
-        bot_layout.addWidget(self.lbl_trab)
-        bot_layout.addWidget(self.lbl_ext)
-        bot_layout.addWidget(self.lbl_cur)
-        bot_layout.addWidget(self.lbl_dev)
-        bot_layout.addWidget(self.lbl_fac)
-
-        bot_layout.addStretch()
-        self.main_layout.addLayout(bot_layout)
-
-    def carregar_dados(self):
-        mes_str = self.combo_mes.currentText()
-        ano_str = self.combo_ano.currentText()
-        mes_int, ano_int = int(mes_str), int(ano_str)
-        _, ultimo_dia = monthrange(ano_int, mes_int)
-
-        cargo_atual, base_hora_atual = obter_dados_usuario(self.usuario_atual)
-        meta_mes_atual = obter_meta_mensal(self.usuario_atual, mes_str, ano_str)
-
-        self.input_cargo.setText(cargo_atual)
-        self.input_base.setText(formatar_horas(base_hora_atual))
-        self.input_meta.setText(formatar_horas(meta_mes_atual))
-
-        try:
-            res = (
-                supabase.table("ponto")
-                .select("*")
-                .eq("funcionario", self.usuario_atual)
-                .execute()
-            )
-            mapa_pontos = {r["data"]: r for r in res.data}
-        except Exception:
-            mapa_pontos = {}
-
-        self.tabela.setRowCount(ultimo_dia)
-        self.dados_memoria = []
-
-        (
-            total_comp_acumulado,
-            total_dev_acumulado,
-            total_trabalhado_bruto,
-            total_cursos,
-        ) = (0.0, 0.0, 0.0, 0.0)
-
-        linhas_exportar = []
-
-        for dia in range(1, ultimo_dia + 1):
-            data_str = f"{dia:02d}/{mes_int:02d}/{ano_int}"
-            dt_obj = datetime.strptime(data_str, "%d/%m/%Y")
-            e_fim_de_semana = dt_obj.weekday() >= 5
-            r = mapa_pontos.get(data_str, {})
-
-            id_reg = r.get("id")
-            e1 = r.get("entrada", "") or ""
-            a1 = r.get("almoco", "") or ""
-            r1 = r.get("retorno", "") or ""
-            s1 = r.get("saida", "") or ""
-            obs = r.get("obs", "") or ""
-            h_curso = float(r.get("cursos") or 0.0)
-
-            h_d_final = calcular_trabalhado_dia(
-                e1, a1, r1, s1, obs, float(base_hora_atual)
-            )
-
-            comp_dia, dev_dia = 0.0, 0.0
-            tem_ponto = any(x and x.strip() != "" for x in [e1, a1, r1, s1])
-            tem_ah = "AH:" in str(obs).upper()
-
-            if tem_ponto or tem_ah:
-                if any(
-                    x in str(obs).upper()
-                    for x in [
-                        "FÉRIAS",
-                        "ABONADA",
-                        "ATESTADO",
-                        "FERIADO",
-                        "FACULTATIVO",
-                    ]
-                ):
-                    h_d_exibir = base_hora_atual
-                else:
-                    if not e_fim_de_semana:
-                        comp_dia = max(0, h_d_final - base_hora_atual)
-                        dev_dia = max(0, base_hora_atual - h_d_final)
-                    else:
-                        comp_dia = h_d_final
-                    h_d_exibir = h_d_final
+        if tem_ponto or tem_ah:
+            if any(
+                x in str(obs).upper()
+                for x in [
+                    "FÉRIAS",
+                    "ABONADA",
+                    "ATESTADO",
+                    "FERIADO",
+                    "FACULTATIVO",
+                ]
+            ):
+                h_d_exibir = base_hora_atual
             else:
-                h_d_exibir = 0.0
+                if not e_fim_de_semana:
+                    comp_dia = max(0, h_d_final - base_hora_atual)
+                    dev_dia = max(0, base_hora_atual - h_d_final)
+                else:
+                    comp_dia = h_d_final
+                h_d_exibir = h_d_final
+        else:
+            h_d_exibir = 0.0
 
-            total_comp_acumulado += comp_dia
-            total_dev_acumulado += dev_dia
-            total_trabalhado_bruto += h_d_exibir
-            total_cursos += h_curso
+        total_comp_acumulado += comp_dia
+        total_dev_acumulado += dev_dia
+        total_trabalhado_bruto += h_d_exibir
+        total_cursos += h_curso
 
-            obs_exibir = (
-                f"({formatar_horas(h_curso)}) " + obs if h_curso > 0 else obs
-            )
-
-            # Ajuste automático de trazercadas com --------- nos sábados e domingos
-            ent_disp = e1 if (e1 or not e_fim_de_semana) else "---------"
-            alm_disp = a1 if (a1 or not e_fim_de_semana) else "---------"
-            ret_disp = r1 if (r1 or not e_fim_de_semana) else "---------"
-            sai_disp = s1 if (s1 or not e_fim_de_semana) else "---------"
-
-            tot_disp = (
-                formatar_horas(h_d_exibir)
-                if (tem_ponto or tem_ah or not e_fim_de_semana)
-                else "---------"
-            )
-            comp_disp = (
-                formatar_horas(comp_dia)
-                if (tem_ponto or tem_ah or not e_fim_de_semana)
-                else "---------"
-            )
-            dev_disp = (
-                formatar_horas(dev_dia)
-                if (tem_ponto or tem_ah or not e_fim_de_semana)
-                else "---------"
-            )
-
-            row_data = {
-                "ID": id_reg,
-                "Data": data_str,
-                "Dia": DIAS_SEMANA[dt_obj.weekday()],
-                "Entrada": ent_disp,
-                "Almoço": alm_disp,
-                "Retorno": ret_disp,
-                "Saída": sai_disp,
-                "Total": tot_disp,
-                "Comp.": comp_disp,
-                "Dev.": dev_disp,
-                "Obs": obs_exibir,
-                "Cursos": h_curso,
-            }
-            self.dados_memoria.append(row_data)
-            linhas_exportar.append(row_data)
-
-            valores = [
-                row_data["Data"],
-                row_data["Dia"],
-                ent_disp,
-                alm_disp,
-                ret_disp,
-                sai_disp,
-                tot_disp,
-                comp_disp,
-                dev_disp,
-                obs_exibir,
-            ]
-            for col_idx, val in enumerate(valores):
-                item = QTableWidgetItem(str(val))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.tabela.setItem(dia - 1, col_idx, item)
-
-        self.df_exibicao = pd.DataFrame(linhas_exportar)
-
-        saldo_mes = total_comp_acumulado - total_dev_acumulado
-        exibir_extras = max(0, saldo_mes)
-        exibir_dev = abs(min(0, saldo_mes))
-        bonus_abatimento = exibir_extras + total_cursos
-        falta_fac_final = max(0, meta_mes_atual - bonus_abatimento)
-
-        txt_meta = (
-            "META OK ✅"
-            if (meta_mes_atual > 0 and falta_fac_final <= 0)
-            else (
-                f"Faltam {formatar_horas(falta_fac_final)}"
-                if meta_mes_atual > 0
-                else "00:00:00"
-            )
+        obs_exibir = (
+            f"({formatar_horas(h_curso)}) " + obs if h_curso > 0 else obs
         )
 
-        self.lbl_trab.setText(
-            f"Trabalhado: {formatar_horas(total_trabalhado_bruto)}"
-        )
-        self.lbl_ext.setText(
-            f"Extras (Líquido): {formatar_horas(exibir_extras)}"
-        )
-        self.lbl_cur.setText(f"Cursos: {formatar_horas(total_cursos)}")
-        self.lbl_dev.setText(f"Devedoras: {formatar_horas(exibir_dev)}")
-        self.lbl_fac.setText(f"Falta Ponto Facultativo: {txt_meta}")
+        ent_disp = e1 if (e1 or not e_fim_de_semana) else "---------"
+        alm_disp = a1 if (a1 or not e_fim_de_semana) else "---------"
+        ret_disp = r1 if (r1 or not e_fim_de_semana) else "---------"
+        sai_disp = s1 if (s1 or not e_fim_de_semana) else "---------"
 
-        self.totais_dict = {
-            "total": formatar_horas(total_trabalhado_bruto),
-            "comp": formatar_horas(exibir_extras),
-            "dev": formatar_horas(exibir_dev),
-            "cursos": formatar_horas(total_cursos),
-            "fac": txt_meta,
+        tot_disp = (
+            formatar_horas(h_d_exibir)
+            if (tem_ponto or tem_ah or not e_fim_de_semana)
+            else "---------"
+        )
+        comp_disp = (
+            formatar_horas(comp_dia)
+            if (tem_ponto or tem_ah or not e_fim_de_semana)
+            else "---------"
+        )
+        dev_disp = (
+            formatar_horas(dev_dia)
+            if (tem_ponto or tem_ah or not e_fim_de_semana)
+            else "---------"
+        )
+
+        row_data = {
+            "ID": id_reg,
+            "Data": data_str,
+            "Dia": DIAS_SEMANA[dt_obj.weekday()],
+            "Entrada": ent_disp,
+            "Almoço": alm_disp,
+            "Retorno": ret_disp,
+            "Saída": sai_disp,
+            "Total": tot_disp,
+            "Comp.": comp_disp,
+            "Dev.": dev_disp,
+            "Obs": obs_exibir,
+            "Cursos": h_curso,
+            "raw_e1": e1,
+            "raw_a1": a1,
+            "raw_r1": r1,
+            "raw_s1": s1,
+            "raw_obs": obs,
         }
+        dados_memoria.append(row_data)
 
-    def salvar_configuracoes(self):
-        base_dec = converter_texto_para_decimal(self.input_base.text())
-        meta_dec = converter_texto_para_decimal(self.input_meta.text())
-        novo_cargo = self.input_cargo.text().strip().upper()
-        mes, ano = self.combo_mes.currentText(), self.combo_ano.currentText()
+    # ------------------------------------------
+    # TABELA PRINCIPAL DE EXIBIÇÃO
+    # ------------------------------------------
+    st.subheader(" Folha de Ponto Mensal")
+    cols_header = st.columns([1.2, 1.2, 1, 1, 1, 1, 1, 1, 1, 2.5, 0.8])
+    headers = [
+        "Data",
+        "Dia",
+        "Ent.",
+        "Alm.",
+        "Ret.",
+        "Sai.",
+        "Total",
+        "Comp.",
+        "Dev.",
+        "Obs",
+        "Editar",
+    ]
+    for col, h in zip(cols_header, headers):
+        col.markdown(f"**{h}**")
 
-        # Converte o valor da jornada (ex: 6.0) para número inteiro (ex: 6) para o Supabase
-        jornada_int = int(round(base_dec))
+    for idx, row in enumerate(dados_memoria):
+        c_data, c_dia, c_ent, c_alm, c_ret, c_sai, c_tot, c_comp, c_dev, c_obs, c_btn = (
+            st.columns([1.2, 1.2, 1, 1, 1, 1, 1, 1, 1, 2.5, 0.8])
+        )
+        c_data.text(row["Data"])
+        c_dia.text(row["Dia"][:3])
+        c_ent.text(row["Entrada"])
+        c_alm.text(row["Almoço"])
+        c_ret.text(row["Retorno"])
+        c_sai.text(row["Saída"])
+        c_tot.text(row["Total"])
+        c_comp.text(row["Comp."])
+        c_dev.text(row["Dev."])
+        c_obs.text(row["Obs"])
 
-        try:
-            supabase.table("usuarios").update(
-                {"jornada": jornada_int, "cargo": novo_cargo}
-            ).eq("usuario", self.usuario_atual.lower()).execute()
+        if c_btn.button("✏️", key=f"btn_edit_{idx}"):
+            st.session_state.edit_row = row
+            st.rerun()
 
-            payload_meta = {
-                "usuario": self.usuario_atual.lower(),
-                "mes": str(mes),
-                "ano": str(ano),
-                "meta": meta_dec,
-            }
+    # ------------------------------------------
+    # MODAL DE EDIÇÃO DE REGISTRO
+    # ------------------------------------------
+    if "edit_row" in st.session_state and st.session_state.edit_row:
+        row_edit = st.session_state.edit_row
+        st.markdown("---")
+        st.subheader(f"✏️ Editar Registro de Ponto - {row_edit['Data']}")
 
-            supabase.table("metas_mensais").upsert(
-                payload_meta, on_conflict="usuario, mes, ano"
-            ).execute()
-            QMessageBox.information(
-                self, "Sucesso", "Configurações salvas no banco com sucesso!"
+        with st.form("form_edicao_ponto"):
+            e1_input = st.text_input(
+                "Entrada:", value=row_edit["raw_e1"] or "00:00:00"
             )
-            self.carregar_dados()
-        except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Erro ao salvar: {e}")
-
-    def gerar_pdf(self):
-        caminho = f"Ponto_{self.usuario_atual}_{self.combo_mes.currentText()}_{self.combo_ano.currentText()}.pdf"
-        try:
-            gerar_pdf_arquivo(
-                self.usuario_atual,
-                self.combo_mes.currentText(),
-                self.combo_ano.currentText(),
-                self.df_exibicao,
-                self.totais_dict,
-                self.input_cargo.text(),
-                caminho,
+            a1_input = st.text_input(
+                "Almoço:", value=row_edit["raw_a1"] or "00:00:00"
             )
-            QMessageBox.information(
-                self, "PDF Gerado", f"PDF gerado com sucesso!\nAbrindo {caminho}..."
+            r1_input = st.text_input(
+                "Retorno:", value=row_edit["raw_r1"] or "00:00:00"
             )
-        except Exception as e:
-            QMessageBox.critical(self, "Erro PDF", f"Falha ao gerar PDF: {e}")
+            s1_input = st.text_input(
+                "Saída:", value=row_edit["raw_s1"] or "00:00:00"
+            )
+            obs_input = st.text_input(
+                "Observação:", value=row_edit["raw_obs"] or ""
+            )
 
-    def abrir_modal_edicao(self, item):
-        data_row = self.dados_memoria[item.row()]
-        dialog = DialogEdicaoPonto(data_row, self.usuario_atual, self)
-        if dialog.exec():
-            self.carregar_dados()
+            cur_raw = row_edit.get("Cursos", 0.0)
+            cur_val_str = (
+                formatar_horas(cur_raw) if cur_raw > 0 else "00:00:00"
+            )
+            curso_input = st.text_input("Horas Curso:", value=cur_val_str)
 
+            col_salvar, col_cancelar = st.columns(2)
+            with col_salvar:
+                btn_salvar = st.form_submit_button(
+                    "💾 SALVAR REGISTRO", use_container_width=True
+                )
+            with col_cancelar:
+                btn_cancelar = st.form_submit_button(
+                    "❌ CANCELAR", use_container_width=True
+                )
 
-def main(usuario="ADMIN"):
-    window = JanelaPonto(usuario=usuario)
-    window.showMaximized()
-    return window
+            if btn_salvar:
+                h_curso_val = converter_texto_para_decimal(
+                    curso_input.strip()
+                )
+                dados_update = {
+                    "entrada": e1_input.strip(),
+                    "almoco": a1_input.strip(),
+                    "retorno": r1_input.strip(),
+                    "saida": s1_input.strip(),
+                    "obs": obs_input.strip().upper(),
+                    "cursos": h_curso_val,
+                }
+                try:
+                    if row_edit.get("ID"):
+                        supabase.table("ponto").update(dados_update).eq(
+                            "id", row_edit["ID"]
+                        ).execute()
+                    else:
+                        dados_update["funcionario"] = usuario
+                        dados_update["data"] = row_edit["Data"]
+                        supabase.table("ponto").insert(dados_update).execute()
+
+                    st.success("Registro atualizado com sucesso!")
+                    st.session_state.edit_row = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
+
+            if btn_cancelar:
+                st.session_state.edit_row = None
+                st.rerun()
+
+    st.markdown("---")
+
+    # ------------------------------------------
+    # CÁLCULOS TOTAIS E CONFIGURAÇÕES
+    # ------------------------------------------
+    saldo_mes = total_comp_acumulado - total_dev_acumulado
+    exibir_extras = max(0, saldo_mes)
+    exibir_dev = abs(min(0, saldo_mes))
+    bonus_abatimento = exibir_extras + total_cursos
+    falta_fac_final = max(0, meta_mes_atual - bonus_abatimento)
+
+    txt_meta = (
+        "META OK ✅"
+        if (meta_mes_atual > 0 and falta_fac_final <= 0)
+        else (
+            f"Faltam {formatar_horas(falta_fac_final)}"
+            if meta_mes_atual > 0
+            else "00:00:00"
+        )
+    )
+
+    totais_dict = {
+        "total": formatar_horas(total_trabalhado_bruto),
+        "comp": formatar_horas(exibir_extras),
+        "dev": formatar_horas(exibir_dev),
+        "cursos": formatar_horas(total_cursos),
+        "fac": txt_meta,
+    }
+
+    # Painel de métricas
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Trabalhado", totais_dict["total"])
+    m2.metric("Extras (Líquido)", totais_dict["comp"])
+    m3.metric("Cursos", totais_dict["cursos"])
+    m4.metric("Devedoras", totais_dict["dev"])
+    m5.metric("Falta Facultativo", txt_meta)
+
+    st.markdown("---")
+
+    # Painel de Configurações do Servidor
+    st.subheader("⚙️ Configurações do Servidor")
+    with st.form("form_config_servidor"):
+        col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
+        with col_cfg1:
+            cfg_base = st.text_input(
+                "Hora base do servidor:",
+                value=formatar_horas(base_hora_atual),
+            )
+        with col_cfg2:
+            cfg_meta = st.text_input(
+                "Meta de Hora de Ponto Facultativo do mês:",
+                value=formatar_horas(meta_mes_atual),
+            )
+        with col_cfg3:
+            cfg_cargo = st.text_input(
+                "Cargo:", value=cargo_atual
+            )
+
+        btn_salvar_cfg = st.form_submit_button("💾 SALVAR CONFIGURAÇÕES")
+
+        if btn_salvar_cfg:
+            base_dec = converter_texto_para_decimal(cfg_base)
+            meta_dec = converter_texto_para_decimal(cfg_meta)
+            novo_cargo = cfg_cargo.strip().upper()
+            jornada_int = int(round(base_dec))
+
+            try:
+                supabase.table("usuarios").update(
+                    {"jornada": jornada_int, "cargo": novo_cargo}
+                ).eq("usuario", usuario.lower()).execute()
+
+                payload_meta = {
+                    "usuario": usuario.lower(),
+                    "mes": str(mes_sel),
+                    "ano": str(ano_sel),
+                    "meta": meta_dec,
+                }
+
+                supabase.table("metas_mensais").upsert(
+                    payload_meta, on_conflict="usuario, mes, ano"
+                ).execute()
+
+                st.success("Configurações salvas no banco com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao salvar configurações: {e}")
+
+    # ------------------------------------------
+    # GERADOR DE PDF DE EXPORTAÇÃO
+    # ------------------------------------------
+    st.markdown("---")
+    pdf_bytes = gerar_pdf_bytes(
+        usuario,
+        mes_sel,
+        ano_sel,
+        dados_memoria,
+        totais_dict,
+        cfg_cargo if 'cfg_cargo' in locals() else cargo_atual,
+    )
+
+    st.download_button(
+        label="📄 BAIXAR PDF DA FOLHA DE PONTO",
+        data=pdf_bytes,
+        file_name=f"Ponto_{usuario}_{mes_sel}_{ano_sel}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+    # Assinatura digital do rodapé
+    st.markdown(
+        """
+        <div class="rodape-assinatura">
+            Desenvolvido por <i>Jefferson Espanha</i> &copy; 2026 | Procuradoria do Município
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = main()
-    sys.exit(app.exec())
+    main()
