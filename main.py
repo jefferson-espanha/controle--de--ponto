@@ -735,10 +735,10 @@ def main(usuario="ADMIN"):
         ano_sel,
         dados_memoria,
         totais_dict,
-        cfg_cargo if 'cfg_cargo' in locals() else cargo_atual,
+        cfg_cargo if "cfg_cargo" in locals() else cargo_atual,
     )
 
-st.download_button(
+    st.download_button(
         label="📄 BAIXAR PDF DA FOLHA DE PONTO",
         data=pdf_bytes,
         file_name=f"Ponto_{usuario}_{mes_sel}_{ano_sel}.pdf",
@@ -746,7 +746,7 @@ st.download_button(
         use_container_width=True,
     )
 
-# Assinatura digital do rodapé
+    # Assinatura digital do rodapé
     st.markdown(
         """
         <div class="rodape-assinatura">
