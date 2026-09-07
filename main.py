@@ -746,7 +746,7 @@ st.download_button(
         use_container_width=True,
     )
 
-    # Assinatura digital do rodapé
+# Assinatura digital do rodapé
     st.markdown(
         """
         <div class="rodape-assinatura">
