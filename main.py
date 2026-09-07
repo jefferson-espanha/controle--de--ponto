@@ -3,6 +3,8 @@ from datetime import datetime
 import io
 import os
 import sys
+
+import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
@@ -293,7 +295,6 @@ def main(usuario="ADMIN"):
         layout="wide",
     )
 
-    # Estilização CSS Personalizada
     st.markdown(
         """
         <style>
@@ -337,7 +338,7 @@ def main(usuario="ADMIN"):
         try:
             res = (
                 supabase.table("ponto")
-                .select("id")
+                .select("*")
                 .eq("funcionario", usuario)
                 .eq("data", hoje)
                 .execute()
@@ -526,44 +527,27 @@ def main(usuario="ADMIN"):
         dados_memoria.append(row_data)
 
     # ------------------------------------------
-    # TABELA PRINCIPAL DE EXIBIÇÃO
+    # TABELA PRINCIPAL DE EXIBIÇÃO (SELEÇÃO POR CLIQUE)
     # ------------------------------------------
-    st.subheader(" Folha de Ponto Mensal")
-    cols_header = st.columns([1.2, 1.2, 1, 1, 1, 1, 1, 1, 1, 2.5, 0.8])
-    headers = [
-        "Data",
-        "Dia",
-        "Ent.",
-        "Alm.",
-        "Ret.",
-        "Sai.",
-        "Total",
-        "Comp.",
-        "Dev.",
-        "Obs",
-        "Editar",
+    st.subheader("📋 Folha de Ponto Mensal")
+    st.caption("💡 Clique em uma linha na tabela para editar o registro do dia.")
+
+    df_exibicao = pd.DataFrame(dados_memoria)[
+        ["Data", "Dia", "Entrada", "Almoço", "Retorno", "Saída", "Total", "Comp.", "Dev.", "Obs"]
     ]
-    for col, h in zip(cols_header, headers):
-        col.markdown(f"**{h}**")
 
-    for idx, row in enumerate(dados_memoria):
-        c_data, c_dia, c_ent, c_alm, c_ret, c_sai, c_tot, c_comp, c_dev, c_obs, c_btn = (
-            st.columns([1.2, 1.2, 1, 1, 1, 1, 1, 1, 1, 2.5, 0.8])
-        )
-        c_data.text(row["Data"])
-        c_dia.text(row["Dia"][:3])
-        c_ent.text(row["Entrada"])
-        c_alm.text(row["Almoço"])
-        c_ret.text(row["Retorno"])
-        c_sai.text(row["Saída"])
-        c_tot.text(row["Total"])
-        c_comp.text(row["Comp."])
-        c_dev.text(row["Dev."])
-        c_obs.text(row["Obs"])
+    event = st.dataframe(
+        df_exibicao,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
 
-        if c_btn.button("✏️", key=f"btn_edit_{idx}"):
-            st.session_state.edit_row = row
-            st.rerun()
+    # Verifica se o usuário clicou em alguma linha
+    if event and event.get("selection") and event["selection"]["rows"]:
+        selected_index = event["selection"]["rows"][0]
+        st.session_state.edit_row = dados_memoria[selected_index]
 
     # ------------------------------------------
     # MODAL DE EDIÇÃO DE REGISTRO
@@ -574,42 +558,32 @@ def main(usuario="ADMIN"):
         st.subheader(f"✏️ Editar Registro de Ponto - {row_edit['Data']}")
 
         with st.form("form_edicao_ponto"):
-            e1_input = st.text_input(
-                "Entrada:", value=row_edit["raw_e1"] or "00:00:00"
-            )
-            a1_input = st.text_input(
-                "Almoço:", value=row_edit["raw_a1"] or "00:00:00"
-            )
-            r1_input = st.text_input(
-                "Retorno:", value=row_edit["raw_r1"] or "00:00:00"
-            )
-            s1_input = st.text_input(
-                "Saída:", value=row_edit["raw_s1"] or "00:00:00"
-            )
-            obs_input = st.text_input(
-                "Observação:", value=row_edit["raw_obs"] or ""
-            )
+            col_in1, col_in2, col_in3, col_in4 = st.columns(4)
+            with col_in1:
+                e1_input = st.text_input("Entrada:", value=row_edit["raw_e1"] or "00:00:00")
+            with col_in2:
+                a1_input = st.text_input("Almoço:", value=row_edit["raw_a1"] or "00:00:00")
+            with col_in3:
+                r1_input = st.text_input("Retorno:", value=row_edit["raw_r1"] or "00:00:00")
+            with col_in4:
+                s1_input = st.text_input("Saída:", value=row_edit["raw_s1"] or "00:00:00")
 
-            cur_raw = row_edit.get("Cursos", 0.0)
-            cur_val_str = (
-                formatar_horas(cur_raw) if cur_raw > 0 else "00:00:00"
-            )
-            curso_input = st.text_input("Horas Curso:", value=cur_val_str)
+            col_obs1, col_obs2 = st.columns([2, 1])
+            with col_obs1:
+                obs_input = st.text_input("Observação:", value=row_edit["raw_obs"] or "")
+            with col_obs2:
+                cur_raw = row_edit.get("Cursos", 0.0)
+                cur_val_str = formatar_horas(cur_raw) if cur_raw > 0 else "00:00:00"
+                curso_input = st.text_input("Horas Curso:", value=cur_val_str)
 
             col_salvar, col_cancelar = st.columns(2)
             with col_salvar:
-                btn_salvar = st.form_submit_button(
-                    "💾 SALVAR REGISTRO", use_container_width=True
-                )
+                btn_salvar = st.form_submit_button("💾 SALVAR REGISTRO", use_container_width=True)
             with col_cancelar:
-                btn_cancelar = st.form_submit_button(
-                    "❌ CANCELAR", use_container_width=True
-                )
+                btn_cancelar = st.form_submit_button("❌ CANCELAR", use_container_width=True)
 
             if btn_salvar:
-                h_curso_val = converter_texto_para_decimal(
-                    curso_input.strip()
-                )
+                h_curso_val = converter_texto_para_decimal(curso_input.strip())
                 dados_update = {
                     "entrada": e1_input.strip(),
                     "almoco": a1_input.strip(),
@@ -620,9 +594,7 @@ def main(usuario="ADMIN"):
                 }
                 try:
                     if row_edit.get("ID"):
-                        supabase.table("ponto").update(dados_update).eq(
-                            "id", row_edit["ID"]
-                        ).execute()
+                        supabase.table("ponto").update(dados_update).eq("id", row_edit["ID"]).execute()
                     else:
                         dados_update["funcionario"] = usuario
                         dados_update["data"] = row_edit["Data"]
@@ -667,7 +639,6 @@ def main(usuario="ADMIN"):
         "fac": txt_meta,
     }
 
-    # Painel de métricas
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Trabalhado", totais_dict["total"])
     m2.metric("Extras (Líquido)", totais_dict["comp"])
@@ -692,9 +663,7 @@ def main(usuario="ADMIN"):
                 value=formatar_horas(meta_mes_atual),
             )
         with col_cfg3:
-            cfg_cargo = st.text_input(
-                "Cargo:", value=cargo_atual
-            )
+            cfg_cargo = st.text_input("Cargo:", value=cargo_atual)
 
         btn_salvar_cfg = st.form_submit_button("💾 SALVAR CONFIGURAÇÕES")
 
@@ -746,7 +715,6 @@ def main(usuario="ADMIN"):
         use_container_width=True,
     )
 
-    # Assinatura digital do rodapé
     st.markdown(
         """
         <div class="rodape-assinatura">
