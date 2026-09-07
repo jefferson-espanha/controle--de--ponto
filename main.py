@@ -3,6 +3,7 @@ from datetime import datetime
 import io
 import os
 import sys
+import zoneinfo
 
 import pandas as pd
 from reportlab.lib import colors
@@ -12,6 +13,9 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import Table, TableStyle
 import streamlit as st
 from supabase import Client, create_client
+
+# Define o fuso horário de Brasília
+FUSO_BRASILIA = zoneinfo.ZoneInfo("America/Sao_Paulo")
 
 # Define o caminho do diretório do script atual
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +52,11 @@ DIAS_SEMANA = [
 # ==========================================
 # 1. FUNÇÕES REGRAS DE NEGÓCIO E CÁLCULO
 # ==========================================
+def obter_agora_brasilia():
+    """Retorna a data e hora atual exatamente no fuso horário de Brasília."""
+    return datetime.now(FUSO_BRASILIA)
+
+
 def formatar_horas(decimal):
     try:
         if decimal is None:
@@ -325,8 +334,11 @@ def main(usuario="ADMIN"):
     c1, c2, c3, c4 = st.columns(4)
 
     def registrar_ponto_rapido(tipo):
-        hoje = datetime.now().strftime("%d/%m/%Y")
-        hora = datetime.now().strftime("%H:%M:%S")
+        # Garante o horário de Brasília (UTC-3)
+        agora_br = obter_agora_brasilia()
+        hoje = agora_br.strftime("%d/%m/%Y")
+        hora = agora_br.strftime("%H:%M:%S")
+
         mapa = {
             "ENTRADA": "entrada",
             "ALMOÇO": "almoco",
@@ -361,7 +373,7 @@ def main(usuario="ADMIN"):
                 }
                 supabase.table("ponto").insert(nova_linha).execute()
 
-            st.success(f"{tipo} registrada com sucesso às {hora}!")
+            st.success(f"{tipo} registrada com sucesso às {hora} (Horário de Brasília)!")
             st.rerun()
         except Exception as e:
             st.error(f"Erro ao registrar ponto: {e}")
@@ -385,12 +397,14 @@ def main(usuario="ADMIN"):
     # FILTROS DE MÊS E ANO
     # ------------------------------------------
     col_mes, col_ano, col_empty = st.columns([2, 2, 6])
+    agora_atual = obter_agora_brasilia()
+    
     with col_mes:
         meses = [f"{i:02d}" for i in range(1, 13)]
         mes_sel = st.selectbox(
             "Mês",
             meses,
-            index=int(datetime.now().strftime("%m")) - 1,
+            index=int(agora_atual.strftime("%m")) - 1,
             key="filtro_mes",
         )
     with col_ano:
@@ -398,7 +412,7 @@ def main(usuario="ADMIN"):
         ano_sel = st.selectbox(
             "Ano",
             anos,
-            index=anos.index(datetime.now().strftime("%Y")),
+            index=anos.index(agora_atual.strftime("%Y")),
             key="filtro_ano",
         )
 
@@ -527,15 +541,16 @@ def main(usuario="ADMIN"):
         dados_memoria.append(row_data)
 
     # ------------------------------------------
-    # TABELA PRINCIPAL DE EXIBIÇÃO (SELEÇÃO POR CLIQUE)
+    # TABELA PRINCIPAL DE EXIBIÇÃO COM EDIÇÃO POR CLIQUE
     # ------------------------------------------
     st.subheader("📋 Folha de Ponto Mensal")
-    st.caption("💡 Clique em uma linha na tabela para editar o registro do dia.")
+    st.caption("👆 Clique em qualquer linha da tabela para abrir a edição dos horários do dia selecionado.")
 
     df_exibicao = pd.DataFrame(dados_memoria)[
         ["Data", "Dia", "Entrada", "Almoço", "Retorno", "Saída", "Total", "Comp.", "Dev.", "Obs"]
     ]
 
+    # Habilita a seleção na tabela para simular o clique de edição
     event = st.dataframe(
         df_exibicao,
         use_container_width=True,
@@ -544,13 +559,12 @@ def main(usuario="ADMIN"):
         selection_mode="single-row",
     )
 
-    # Verifica se o usuário clicou em alguma linha
     if event and event.get("selection") and event["selection"]["rows"]:
         selected_index = event["selection"]["rows"][0]
         st.session_state.edit_row = dados_memoria[selected_index]
 
     # ------------------------------------------
-    # MODAL DE EDIÇÃO DE REGISTRO
+    # FORMULÁRIO DE EDIÇÃO DE REGISTRO
     # ------------------------------------------
     if "edit_row" in st.session_state and st.session_state.edit_row:
         row_edit = st.session_state.edit_row
